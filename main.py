@@ -1,6 +1,7 @@
 """Entry point: opens a direct-message style popup window to chat with your tsundere girlfriend."""  # explains what this file is for
+
+import os  # builds file paths and lists the avatars folder
 import re  # regular expressions, used to split her reply into English and Japanese
-import os # builds file paths and lists the avatars folder
 import threading  # runs the slow API call in the background so the window doesn't freeze
 import tkinter as tk  # Python's built-in GUI toolkit (this is the popup window)
 from tkinter import ttk, filedialog, messagebox  # themed widgets, file-picker dialog, and message popups
@@ -9,7 +10,7 @@ from PIL import Image, ImageDraw, ImageTk  # Pillow: open images, draw the circl
 
 import config  # our settings (API key, names, etc.)
 from ai_client import TsundereBrain  # the class that talks to Gemini
-from voice import VoiceEngine, VOICE_PRESETS, SAMPLE_LINE  # text-to-speech engine, voice choices, and a sample line
+from voice import VoiceEngine, VOICE_PRESETS, SAMPLE_LINE, SAMPLE_LINE_EN  # text-to-speech engine, voice choices, and sample lines
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # the folder this file lives in
 AVATAR_DIR = os.path.join(BASE_DIR, "avatars")  # the folder holding the profile picture choices
@@ -48,6 +49,7 @@ def make_round_photo(path, size):  # turns any image file into a circular Tk-com
     image.putalpha(mask)  # apply the mask so only the circle shows
     return ImageTk.PhotoImage(image)  # convert to a format Tkinter labels can display
 
+
 def split_reply(raw):  # splits "EN: ... JP: ..." into two strings
     """Return (english, japanese). If the format is missing, japanese is empty."""  # description
     jp_match = re.search(r"JP:\s*(.*)", raw, re.S)  # everything after "JP:"
@@ -55,6 +57,7 @@ def split_reply(raw):  # splits "EN: ... JP: ..." into two strings
     english = en_match.group(1).strip() if en_match else raw.strip()  # English part (or the whole text if no tag)
     japanese = jp_match.group(1).strip() if jp_match else ""  # Japanese part (empty if missing)
     return english, japanese  # hand both back
+
 
 class ChatApp:  # the whole window and its behaviour
     """Builds the DM-style window and handles sending/receiving messages."""  # class description
@@ -70,7 +73,8 @@ class ChatApp:  # the whole window and its behaviour
         self.voice = VoiceEngine()  # set up text-to-speech
         self.avatars = list_avatars()  # scan the avatars folder
         self.avatar_photo = None  # will hold the current profile picture (must be kept alive or Tk drops it)
-        self.voice_on = tk.BooleanVar(value=True)  # True/False variable bound to the "Voice" checkbox
+        self.voice_on = tk.BooleanVar(value=True)  # True/False variable bound to the "Speak" checkbox
+        self.english_dub = tk.BooleanVar(value=False)  # True = English dub, False = Japanese voice
 
         self._build_header()  # create the top bar (picture, name, dropdowns)
         self._build_input()  # create the bottom message box (packed before chat so it stays at the bottom)
@@ -85,7 +89,7 @@ class ChatApp:  # the whole window and its behaviour
         greeting_en = "Hmph! Y-you're finally here, baka! ...Not that I was waiting or anything!"  # her English opening line
         greeting_jp = "ふん！やっと来たの、バカ！べ、別に待ってたわけじゃないんだからね！"  # her Japanese opening line
         self.add_message("bot", f"{greeting_en}\n{greeting_jp}")  # show both lines in the chat
-        self.speak(greeting_jp)  # say the Japanese line out loud
+        self.speak(greeting_en, greeting_jp)  # say the greeting out loud in the selected language
 
     def _build_header(self):  # creates the top part of the window
         header = tk.Frame(self.root, bg=HEADER_BG)  # container frame for the header
@@ -122,6 +126,12 @@ class ChatApp:  # the whole window and its behaviour
         self.avatar_box.grid(row=1, column=1, padx=6, pady=2, sticky="w")  # place it under the voice dropdown
         self.avatar_box.bind("<<ComboboxSelected>>", self.on_avatar_selected)  # call our handler when a picture is picked
         ttk.Button(settings, text="Upload…", width=8, command=self.on_upload_avatar).grid(row=1, column=2, padx=4)  # custom image button
+
+        tk.Label(settings, text="Language:", bg=HEADER_BG, fg="white", font=("Segoe UI", 9)).grid(row=2, column=0, sticky="w")  # language label
+        tk.Checkbutton(  # checkbox to switch between Japanese voice and English dub
+            settings, text="English dub (off = Japanese)", variable=self.english_dub, command=self.on_dub_toggle,  # bound to english_dub, calls handler on click
+            bg=HEADER_BG, fg="white", selectcolor=HEADER_BG, activebackground=HEADER_BG, activeforeground="white",  # dark-theme colours
+        ).grid(row=2, column=1, columnspan=2, padx=2, sticky="w")  # place it under the picture dropdown
 
     def _build_chat(self):  # creates the scrolling message area
         area = tk.Frame(self.root, bg=CHAT_BG)  # container for the text box and its scrollbar
@@ -186,13 +196,21 @@ class ChatApp:  # the whole window and its behaviour
         if path:  # if a file was chosen
             self.set_avatar(path)  # display it
 
-    def speak(self, text):  # speaks text using the currently selected voice (if Speak is ticked)
-        if self.voice_on.get():  # only if the checkbox is on
-            self.voice.speak(text, self.voice_box.get())  # send text + chosen preset to the voice engine
+    def speak(self, english, japanese):  # speaks her line in the selected language (if Speak is ticked)
+        if not self.voice_on.get() or not japanese:  # silent if Speak is off, or if this is an error message (no Japanese line)
+            return  # do nothing
+        if self.english_dub.get():  # English dub mode
+            self.voice.speak(english, self.voice_box.get(), "en")  # speak the English line with the English dub voice
+        else:  # Japanese mode
+            self.voice.speak(japanese, self.voice_box.get(), "jp")  # speak the Japanese line with the VOICEVOX voice
 
     def on_voice_selected(self, event):  # runs when you pick a different voice
         self.voice.stop()  # cut off whatever is currently playing
-        self.speak(SAMPLE_LINE)  # play a sample line so you can hear the new voice
+        self.speak(SAMPLE_LINE_EN, SAMPLE_LINE)  # play a sample line so you can hear the new voice
+
+    def on_dub_toggle(self):  # runs when you switch between Japanese and English dub
+        self.voice.stop()  # cut off whatever is currently playing
+        self.speak(SAMPLE_LINE_EN, SAMPLE_LINE)  # play a sample line in the newly selected language
 
     def on_voice_toggle(self):  # runs when you click the "Speak" checkbox
         if not self.voice_on.get():  # if it was just switched off
@@ -217,8 +235,7 @@ class ChatApp:  # the whole window and its behaviour
         english, japanese = split_reply(reply)  # separate the English and Japanese lines
         shown = f"{english}\n{japanese}" if japanese else english  # show both if Japanese exists
         self.add_message("bot", shown)  # show her answer in the chat
-        if japanese:  # only speak when there is Japanese text (error messages stay silent)
-            self.speak(japanese)  # say the Japanese line out loud
+        self.speak(english, japanese)  # say her line out loud in the selected language (error messages stay silent)
         self.send_button.config(state="normal")  # re-enable the Send button
         self.entry.focus_set()  # put the cursor back in the message box
 

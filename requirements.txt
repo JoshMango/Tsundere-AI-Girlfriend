@@ -3,3 +3,4 @@ edge-tts
 pygame
 pillow
 python-dotenv
+requests

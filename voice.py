@@ -1,6 +1,7 @@
 """Text-to-speech: expressive anime voices via the local VOICEVOX engine, with edge-tts as a backup."""  # explains what this file is for
 
 import asyncio  # edge-tts (the backup voice) is asynchronous, so we need asyncio
+import json  # reads the english_voices.json file that maps presets to ElevenLabs voice ids
 import os  # file paths, environment variables, and deleting temp files
 import re  # regular expressions, used to strip *actions* out of the spoken text
 import tempfile  # creates temporary audio files for each spoken line
@@ -14,21 +15,54 @@ VOICEVOX_URL = os.getenv("VOICEVOX_URL", "http://127.0.0.1:50021")  # where the 
 SFX_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sfx")  # optional folder for real sound-effect recordings
 SFX_MAP = {"ふん": "hmph.wav", "むぅ": "mu.wav", "はぁ": "sigh.wav", "ちっ": "tsk.wav"}  # line starts with this -> play this file first
 FALLBACK_VOICE = "ja-JP-NanamiNeural"  # the backup edge-tts voice if VOICEVOX is unavailable
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # the folder this file lives in
+EN_VOICES_FILE = os.path.join(BASE_DIR, "english_voices.json")  # optional file: {"Preset name": "elevenlabs_voice_id"}
+HMPH_TAG = "[huffs]"  # ElevenLabs v3 audio tag inserted before "Hmph" so it sounds like a real huff (edit or set to "" to disable)
 
-# Each preset picks a different VOICEVOX character + style, plus tuning:
-#   speed = talking speed (1.0 normal), pitch = -0.15..+0.15 shift, intonation = how expressive/exaggerated (1.0 normal),
-#   volume = loudness (1.0 normal).
+# Each preset has two voices: the Japanese one (VOICEVOX character + style + tuning) and the English dub one ("en", edge-tts).
+#   Japanese tuning: speed = talking speed (1.0 normal), pitch = -0.15..+0.15, intonation = expressiveness, volume = loudness.
+#   English tuning: rate = speed (+10% = faster), pitch = Hz shift, volume = loudness (+40% = louder).
+#   "el" = ElevenLabs settings (used only if you add an ElevenLabs key): mood tag, stability, speed.
 VOICE_PRESETS = {  # dictionary of all voice choices shown in the dropdown
-    "Classic Tsundere": {"character": "九州そら", "style": "ツンツン", "speed": 1.05, "pitch": 0.0, "intonation": 1.4, "volume": 1.1},  # snappy, sharp girl
-    "Sassy & Grumpy (loud)": {"character": "四国めたん", "style": "ツンツン", "speed": 1.2, "pitch": 0.02, "intonation": 1.7, "volume": 1.6},  # fast, loud, annoyed
-    "Soft & Shy": {"character": "雨晴はう", "style": "ノーマル", "speed": 0.88, "pitch": 0.06, "intonation": 1.25, "volume": 0.9},  # higher, slower, quiet
-    "Cool Ojou-sama": {"character": "波音リツ", "style": "クイーン", "speed": 0.95, "pitch": -0.03, "intonation": 1.3, "volume": 1.1},  # proud, calm, lower
-    "Bratty Sweet": {"character": "四国めたん", "style": "あまあま", "speed": 1.1, "pitch": 0.05, "intonation": 1.5, "volume": 1.2},  # sugary but bratty
-    "Genki Rival": {"character": "春日部つむぎ", "style": "ノーマル", "speed": 1.2, "pitch": 0.03, "intonation": 1.6, "volume": 1.4},  # energetic, competitive
-    "Gentle Big-Sis Dere": {"character": "もち子さん", "style": "ノーマル", "speed": 0.95, "pitch": 0.0, "intonation": 1.2, "volume": 1.0},  # warm, mature, soft
+    "Classic Tsundere": {  # snappy, sharp girl
+        "character": "九州そら", "style": "ツンツン", "speed": 1.05, "pitch": 0.0, "intonation": 1.4, "volume": 1.1,  # Japanese (VOICEVOX)
+        "en": {"voice": "en-US-JennyNeural", "rate": "+8%", "pitch": "+4Hz", "volume": "+10%"},  # English dub
+        "el": {"tag": "[annoyed]", "stability": 0.0, "speed": 1.05},  # ElevenLabs settings: mood tag, stability (0.0 = most emotional), speed
+    },  # end of preset
+    "Sassy & Grumpy (loud)": {  # fast, loud, annoyed
+        "character": "四国めたん", "style": "ツンツン", "speed": 1.2, "pitch": 0.02, "intonation": 1.7, "volume": 1.6,  # Japanese (VOICEVOX)
+        "en": {"voice": "en-US-AriaNeural", "rate": "+18%", "pitch": "+2Hz", "volume": "+40%"},  # English dub
+        "el": {"tag": "[angry]", "stability": 0.0, "speed": 1.15},  # ElevenLabs settings: mood tag, stability (0.0 = most emotional), speed
+    },  # end of preset
+    "Soft & Shy": {  # higher, slower, quiet
+        "character": "雨晴はう", "style": "ノーマル", "speed": 0.88, "pitch": 0.06, "intonation": 1.25, "volume": 0.9,  # Japanese (VOICEVOX)
+        "en": {"voice": "en-US-MichelleNeural", "rate": "-12%", "pitch": "+8Hz", "volume": "-20%"},  # English dub
+        "el": {"tag": "[shyly]", "stability": 0.5, "speed": 0.9},  # ElevenLabs settings: mood tag, stability (0.0 = most emotional), speed
+    },  # end of preset
+    "Cool Ojou-sama": {  # proud, calm, lower
+        "character": "波音リツ", "style": "クイーン", "speed": 0.95, "pitch": -0.03, "intonation": 1.3, "volume": 1.1,  # Japanese (VOICEVOX)
+        "en": {"voice": "en-GB-SoniaNeural", "rate": "-5%", "pitch": "-2Hz", "volume": "+5%"},  # English dub
+        "el": {"tag": "[haughty]", "stability": 0.5, "speed": 0.95},  # ElevenLabs settings: mood tag, stability (0.0 = most emotional), speed
+    },  # end of preset
+    "Bratty Sweet": {  # sugary but bratty
+        "character": "四国めたん", "style": "あまあま", "speed": 1.1, "pitch": 0.05, "intonation": 1.5, "volume": 1.2,  # Japanese (VOICEVOX)
+        "en": {"voice": "en-AU-NatashaNeural", "rate": "+8%", "pitch": "+8Hz", "volume": "+15%"},  # English dub
+        "el": {"tag": "[teasing]", "stability": 0.0, "speed": 1.05},  # ElevenLabs settings: mood tag, stability (0.0 = most emotional), speed
+    },  # end of preset
+    "Genki Rival": {  # energetic, competitive
+        "character": "春日部つむぎ", "style": "ノーマル", "speed": 1.2, "pitch": 0.03, "intonation": 1.6, "volume": 1.4,  # Japanese (VOICEVOX)
+        "en": {"voice": "en-CA-ClaraNeural", "rate": "+20%", "pitch": "+4Hz", "volume": "+25%"},  # English dub
+        "el": {"tag": "[excited]", "stability": 0.0, "speed": 1.15},  # ElevenLabs settings: mood tag, stability (0.0 = most emotional), speed
+    },  # end of preset
+    "Gentle Big-Sis Dere": {  # warm, mature, soft
+        "character": "もち子さん", "style": "ノーマル", "speed": 0.95, "pitch": 0.0, "intonation": 1.2, "volume": 1.0,  # Japanese (VOICEVOX)
+        "en": {"voice": "en-IE-EmilyNeural", "rate": "-3%", "pitch": "+0Hz", "volume": "+0%"},  # English dub
+        "el": {"tag": "[warmly]", "stability": 0.5, "speed": 0.95},  # ElevenLabs settings: mood tag, stability (0.0 = most emotional), speed
+    },  # end of preset
 }  # end of presets
 
 SAMPLE_LINE = "ふんっ！これが私の声よ、バカ！な、慣れないでよね！"  # Japanese line spoken when you pick a new voice
+SAMPLE_LINE_EN = "Hmph! This is my voice now, baka! D-don't get used to it!"  # English line spoken in English dub mode
 
 
 class VoiceEngine:  # handles turning text into audio and playing it
@@ -132,20 +166,99 @@ class VoiceEngine:  # handles turning text into audio and playing it
             pygame.time.wait(100)  # sleep 100 ms between checks to avoid using CPU
         pygame.mixer.music.unload()  # release the file so Windows lets us delete it
 
-    def speak(self, text, preset_name):  # public method: speak this text using the chosen voice preset
-        """Start speaking in a background thread so the UI never freezes."""  # description
+    @staticmethod  # this helper doesn't need access to "self"
+    def _fix_english(text):  # rewrites sound-effect words so the English voice pronounces them better
+        text = re.sub(r"\bh+m+p+h+\b", "Hmmf", text, flags=re.I)  # "Hmph" -> "Hmmf" (sounds more like a huff)
+        text = re.sub(r"\btch\b", "tsk", text, flags=re.I)  # "Tch" -> "tsk"
+        text = re.sub(r"\bgeez\b", "jeez", text, flags=re.I)  # "Geez" -> "jeez"
+        return text  # the adjusted text
+
+    @staticmethod  # this helper doesn't need access to "self"
+    def _english_voice_id(preset_name):  # finds the ElevenLabs voice id for this preset
+        try:  # the json file is optional and might be missing or malformed
+            with open(EN_VOICES_FILE, encoding="utf-8") as voices_file:  # open english_voices.json
+                mapping = json.load(voices_file)  # parse it into a dict
+        except (OSError, ValueError):  # file missing or invalid json
+            mapping = {}  # treat as empty
+        return mapping.get(preset_name) or os.getenv("ELEVENLABS_VOICE_ID", "")  # preset-specific id, else the default id from .env
+
+    def _synth_elevenlabs(self, text, preset_name, path):  # creates an expressive English mp3 with ElevenLabs; True on success
+        api_key = os.getenv("ELEVENLABS_API_KEY", "")  # your ElevenLabs key from .env
+        if not api_key:  # no key set
+            return False  # tell the caller to use the Edge voice
+        voice_id = self._english_voice_id(preset_name)  # which ElevenLabs voice to use
+        if not voice_id:  # no voice chosen yet
+            print("[voice] no ElevenLabs voice id set (see english_voices.json / ELEVENLABS_VOICE_ID)")  # explain in the console
+            return False  # tell the caller to use the Edge voice
+        settings = VOICE_PRESETS[preset_name]["el"]  # mood tag, stability and speed for this preset
+        spoken = re.sub(r"\b(h+m+p+h+)\b", HMPH_TAG + r" \1", text, flags=re.I) if HMPH_TAG else text  # add the huff tag before "Hmph"
+        body = {  # the request payload
+            "text": f"{settings['tag']} {spoken}",  # mood tag + the line to speak
+            "model_id": os.getenv("ELEVENLABS_MODEL", "eleven_v3"),  # the expressive model that understands audio tags
+            "voice_settings": {  # per-request voice tuning
+                "stability": settings["stability"],  # lower = more emotional and varied
+                "similarity_boost": 0.75,  # how closely to stick to the original voice
+                "speed": settings["speed"],  # talking speed (1.0 normal)
+            },  # end of voice_settings
+        }  # end of body
+        try:  # network calls can fail
+            reply = requests.post(  # send the text-to-speech request
+                f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",  # endpoint for this voice
+                params={"output_format": "mp3_44100_128"},  # ask for a normal mp3
+                headers={"xi-api-key": api_key, "Content-Type": "application/json"},  # authentication + body type
+                json=body,  # the payload above
+                timeout=60,  # give up after 60 seconds
+            )  # end of the request
+            if reply.status_code != 200:  # ElevenLabs returned an error (bad key, no credits, plan limit, etc.)
+                print(f"[voice] ElevenLabs error {reply.status_code}: {reply.text[:300]}")  # show why in the console
+                return False  # tell the caller to use the Edge voice
+            with open(path, "wb") as audio_file:  # open the temp mp3 for writing bytes
+                audio_file.write(reply.content)  # save the audio
+            return True  # success
+        except requests.RequestException as error:  # network problem
+            print(f"[voice] ElevenLabs request failed: {error}")  # print to the console
+            return False  # tell the caller to use the Edge voice
+
+    def _speak_english(self, text, preset_name):  # speaks English text: ElevenLabs if available, else the Edge English voice
+        english = VOICE_PRESETS[preset_name]["en"]  # the Edge voice settings for this preset (backup)
+        mp3_path = self._temp_path(".mp3")  # temp file for the audio
+        try:  # make sure the temp file is always cleaned up
+            if not self._synth_elevenlabs(text, preset_name, mp3_path):  # try the expressive ElevenLabs voice first
+                communicate = edge_tts.Communicate(  # build the backup speech request
+                    self._fix_english(text),  # the text to speak (with sound-effect words adjusted)
+                    english["voice"],  # which English neural voice to use
+                    rate=english["rate"],  # speaking speed adjustment
+                    pitch=english["pitch"],  # pitch adjustment
+                    volume=english["volume"],  # loudness adjustment
+                )  # end of Communicate(...)
+                asyncio.run(communicate.save(mp3_path))  # download the audio into the temp file
+            self._play(mp3_path)  # play it
+        finally:  # always runs, even after an error
+            try:  # deleting might fail if the file is still locked
+                os.remove(mp3_path)  # delete the temp audio file
+            except OSError:  # ignore delete problems
+                pass  # nothing else to do
+
+    def speak(self, text, preset_name, language="jp"):  # public method: speak this text with the chosen voice preset
+        """Start speaking in a background thread so the UI never freezes. language is 'jp' or 'en'."""  # description
         if not self.available:  # if there is no audio device
             return  # do nothing
-        threading.Thread(target=self._speak_worker, args=(text, preset_name), daemon=True).start()  # run the worker in the background
+        threading.Thread(target=self._speak_worker, args=(text, preset_name, language), daemon=True).start()  # run the worker in the background
 
-    def _speak_worker(self, text, preset_name):  # the function the background thread actually runs
-        """Synthesize the line (VOICEVOX, else backup voice), play it, then clean up."""  # description
+    def _speak_worker(self, text, preset_name, language):  # the function the background thread actually runs
+        """Synthesize the line (English dub, VOICEVOX, or backup voice), play it, then clean up."""  # description
         clean_text = self._clean(text)  # strip out the *actions*
         if not clean_text:  # if nothing is left to say
             return  # skip speaking
         if preset_name not in VOICE_PRESETS:  # unknown preset name
             preset_name = next(iter(VOICE_PRESETS))  # use the first preset
         with self._lock:  # wait for any previous line to finish first
+            if language == "en":  # English dub mode
+                try:  # guard the network + playback steps
+                    self._speak_english(clean_text, preset_name)  # speak with the English dub voice
+                except Exception as error:  # any failure (no internet, service down, etc.)
+                    print(f"[voice error] {error}")  # print to the console; the chat keeps working
+                return  # done, skip the Japanese path
             clean_text = self._play_sfx(clean_text)  # play a real "hmph" recording first, if you added one
             if not clean_text:  # nothing left after removing the reaction
                 return  # done
