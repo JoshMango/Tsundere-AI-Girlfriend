@@ -10,6 +10,7 @@ from PIL import Image, ImageDraw, ImageTk  # Pillow: open images, draw the circl
 
 import config  # our settings (API key, names, etc.)
 from ai_client import TsundereBrain  # the class that talks to Gemini
+from sprites import SpriteStage, EMOTIONS  # the visual-novel sprite panel and the list of valid emotions
 from voice import VoiceEngine, VOICE_PRESETS, SAMPLE_LINE, SAMPLE_LINE_EN  # text-to-speech engine, voice choices, and sample lines
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # the folder this file lives in
@@ -50,13 +51,16 @@ def make_round_photo(path, size):  # turns any image file into a circular Tk-com
     return ImageTk.PhotoImage(image)  # convert to a format Tkinter labels can display
 
 
-def split_reply(raw):  # splits "EN: ... JP: ..." into two strings
-    """Return (english, japanese). If the format is missing, japanese is empty."""  # description
-    jp_match = re.search(r"JP:\s*(.*)", raw, re.S)  # everything after "JP:"
-    en_match = re.search(r"EN:\s*(.*?)\s*(?=JP:|\Z)", raw, re.S)  # everything after "EN:" up to "JP:" or the end
-    english = en_match.group(1).strip() if en_match else raw.strip()  # English part (or the whole text if no tag)
-    japanese = jp_match.group(1).strip() if jp_match else ""  # Japanese part (empty if missing)
-    return english, japanese  # hand both back
+def parse_reply(raw):  # splits "EN: ... JP: ... EMO: ..." into three values
+    """Return (english, japanese, emotion). Missing parts come back empty / 'neutral'."""  # description
+    def grab(tag):  # pulls out the text that follows one tag (up to the next tag or the end)
+        found = re.search(rf"(?:^|\n)\s*{tag}:\s*(.*?)\s*(?=\n\s*(?:EN|JP|EMO):|\Z)", raw, re.S)  # match "TAG: text"
+        return found.group(1).strip() if found else ""  # the text, or empty if the tag is missing
+    japanese = grab("JP")  # the Japanese line (empty if missing)
+    english = grab("EN") or ("" if japanese else raw.strip())  # the English line (whole text if no tags at all)
+    words = re.findall(r"[a-z]+", grab("EMO").lower())  # the emotion word(s) the AI wrote
+    emotion = words[0] if words and words[0] in EMOTIONS else "neutral"  # first word if valid, else neutral
+    return english, japanese, emotion  # hand all three back
 
 
 class ChatApp:  # the whole window and its behaviour
@@ -65,8 +69,8 @@ class ChatApp:  # the whole window and its behaviour
     def __init__(self, root):  # runs once when the app starts
         self.root = root  # keep a reference to the main window
         self.root.title(f"{config.CHARACTER_NAME} - Direct Message")  # window title bar text
-        self.root.geometry("440x700")  # starting window size (width x height)
-        self.root.minsize(380, 540)  # smallest size the user can shrink it to
+        self.root.geometry("860x700")  # starting window size (width x height)
+        self.root.minsize(760, 540)  # smallest size the user can shrink it to
         self.root.configure(bg=CHAT_BG)  # window background colour
 
         self.brain = TsundereBrain()  # connect to Gemini and start a chat session
@@ -75,7 +79,10 @@ class ChatApp:  # the whole window and its behaviour
         self.avatar_photo = None  # will hold the current profile picture (must be kept alive or Tk drops it)
         self.voice_on = tk.BooleanVar(value=True)  # True/False variable bound to the "Speak" checkbox
         self.english_dub = tk.BooleanVar(value=False)  # True = English dub, False = Japanese voice
+        self.show_sprite = tk.BooleanVar(value=True)  # True = show the sprite panel on the left
 
+        self.stage = SpriteStage(self.root, config.CHARACTER_NAME)  # the visual-novel sprite panel
+        self.stage.pack(side="left", fill="y")  # dock it on the left so the chat uses the remaining space
         self._build_header()  # create the top bar (picture, name, dropdowns)
         self._build_input()  # create the bottom message box (packed before chat so it stays at the bottom)
         self._build_chat()  # create the scrolling message area in the middle
@@ -89,10 +96,12 @@ class ChatApp:  # the whole window and its behaviour
         greeting_en = "Hmph! Y-you're finally here, baka! ...Not that I was waiting or anything!"  # her English opening line
         greeting_jp = "ふん！やっと来たの、バカ！べ、別に待ってたわけじゃないんだからね！"  # her Japanese opening line
         self.add_message("bot", f"{greeting_en}\n{greeting_jp}")  # show both lines in the chat
+        self.stage.set_emotion("pout")  # she starts off sulking about you being late
         self.speak(greeting_en, greeting_jp)  # say the greeting out loud in the selected language
 
     def _build_header(self):  # creates the top part of the window
         header = tk.Frame(self.root, bg=HEADER_BG)  # container frame for the header
+        self.header = header  # keep a reference so the sprite panel can be re-docked before it
         header.pack(side="top", fill="x")  # stick it to the top and stretch across the width
 
         top_row = tk.Frame(header, bg=HEADER_BG)  # row holding the picture and the name
@@ -132,6 +141,12 @@ class ChatApp:  # the whole window and its behaviour
             settings, text="English dub (off = Japanese)", variable=self.english_dub, command=self.on_dub_toggle,  # bound to english_dub, calls handler on click
             bg=HEADER_BG, fg="white", selectcolor=HEADER_BG, activebackground=HEADER_BG, activeforeground="white",  # dark-theme colours
         ).grid(row=2, column=1, columnspan=2, padx=2, sticky="w")  # place it under the picture dropdown
+
+        tk.Label(settings, text="Sprite:", bg=HEADER_BG, fg="white", font=("Segoe UI", 9)).grid(row=3, column=0, sticky="w")  # sprite label
+        tk.Checkbutton(  # checkbox to show or hide the sprite panel
+            settings, text="Show sprite panel", variable=self.show_sprite, command=self.on_sprite_toggle,  # bound to show_sprite, calls handler on click
+            bg=HEADER_BG, fg="white", selectcolor=HEADER_BG, activebackground=HEADER_BG, activeforeground="white",  # dark-theme colours
+        ).grid(row=3, column=1, columnspan=2, padx=2, sticky="w")  # place it under the language checkbox
 
     def _build_chat(self):  # creates the scrolling message area
         area = tk.Frame(self.root, bg=CHAT_BG)  # container for the text box and its scrollbar
@@ -212,6 +227,12 @@ class ChatApp:  # the whole window and its behaviour
         self.voice.stop()  # cut off whatever is currently playing
         self.speak(SAMPLE_LINE_EN, SAMPLE_LINE)  # play a sample line in the newly selected language
 
+    def on_sprite_toggle(self):  # runs when you tick/untick "Show sprite panel"
+        if self.show_sprite.get():  # turned on
+            self.stage.pack(side="left", fill="y", before=self.header)  # dock it back on the left
+        else:  # turned off
+            self.stage.pack_forget()  # hide it (the chat expands to fill the window)
+
     def on_voice_toggle(self):  # runs when you click the "Speak" checkbox
         if not self.voice_on.get():  # if it was just switched off
             self.voice.stop()  # silence any audio right away
@@ -232,7 +253,8 @@ class ChatApp:  # the whole window and its behaviour
 
     def _show_reply(self, reply):  # runs on the UI thread once the answer arrives
         self.status_label.config(text="● online", fg="#7CFC98")  # she's no longer typing
-        english, japanese = split_reply(reply)  # separate the English and Japanese lines
+        english, japanese, emotion = parse_reply(reply)  # separate the English line, Japanese line and emotion
+        self.stage.set_emotion(emotion)  # switch the sprite to the matching expression
         shown = f"{english}\n{japanese}" if japanese else english  # show both if Japanese exists
         self.add_message("bot", shown)  # show her answer in the chat
         self.speak(english, japanese)  # say her line out loud in the selected language (error messages stay silent)
