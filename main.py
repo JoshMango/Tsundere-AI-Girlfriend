@@ -1,6 +1,6 @@
 """Entry point: opens a direct-message style popup window to chat with your tsundere girlfriend."""  # explains what this file is for
-
-import os  # builds file paths and lists the avatars folder
+import re  # regular expressions, used to split her reply into English and Japanese
+import os # builds file paths and lists the avatars folder
 import threading  # runs the slow API call in the background so the window doesn't freeze
 import tkinter as tk  # Python's built-in GUI toolkit (this is the popup window)
 from tkinter import ttk, filedialog, messagebox  # themed widgets, file-picker dialog, and message popups
@@ -48,6 +48,13 @@ def make_round_photo(path, size):  # turns any image file into a circular Tk-com
     image.putalpha(mask)  # apply the mask so only the circle shows
     return ImageTk.PhotoImage(image)  # convert to a format Tkinter labels can display
 
+def split_reply(raw):  # splits "EN: ... JP: ..." into two strings
+    """Return (english, japanese). If the format is missing, japanese is empty."""  # description
+    jp_match = re.search(r"JP:\s*(.*)", raw, re.S)  # everything after "JP:"
+    en_match = re.search(r"EN:\s*(.*?)\s*(?=JP:|\Z)", raw, re.S)  # everything after "EN:" up to "JP:" or the end
+    english = en_match.group(1).strip() if en_match else raw.strip()  # English part (or the whole text if no tag)
+    japanese = jp_match.group(1).strip() if jp_match else ""  # Japanese part (empty if missing)
+    return english, japanese  # hand both back
 
 class ChatApp:  # the whole window and its behaviour
     """Builds the DM-style window and handles sending/receiving messages."""  # class description
@@ -75,9 +82,10 @@ class ChatApp:  # the whole window and its behaviour
             self.set_avatar(self.avatars[first_name])  # display it in the header
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)  # run on_close when the window's X is clicked
-        greeting = "Hmph! Y-you're finally here, baka! ...Not that I was waiting or anything!"  # her opening line
-        self.add_message("bot", greeting)  # show the greeting in the chat
-        self.speak(greeting)  # say the greeting out loud
+        greeting_en = "Hmph! Y-you're finally here, baka! ...Not that I was waiting or anything!"  # her English opening line
+        greeting_jp = "ふん！やっと来たの、バカ！べ、別に待ってたわけじゃないんだからね！"  # her Japanese opening line
+        self.add_message("bot", f"{greeting_en}\n{greeting_jp}")  # show both lines in the chat
+        self.speak(greeting_jp)  # say the Japanese line out loud
 
     def _build_header(self):  # creates the top part of the window
         header = tk.Frame(self.root, bg=HEADER_BG)  # container frame for the header
@@ -206,8 +214,11 @@ class ChatApp:  # the whole window and its behaviour
 
     def _show_reply(self, reply):  # runs on the UI thread once the answer arrives
         self.status_label.config(text="● online", fg="#7CFC98")  # she's no longer typing
-        self.add_message("bot", reply)  # show her answer
-        self.speak(reply)  # say it out loud
+        english, japanese = split_reply(reply)  # separate the English and Japanese lines
+        shown = f"{english}\n{japanese}" if japanese else english  # show both if Japanese exists
+        self.add_message("bot", shown)  # show her answer in the chat
+        if japanese:  # only speak when there is Japanese text (error messages stay silent)
+            self.speak(japanese)  # say the Japanese line out loud
         self.send_button.config(state="normal")  # re-enable the Send button
         self.entry.focus_set()  # put the cursor back in the message box
 
